@@ -2,13 +2,14 @@
 
 -- Create a local_core table for purchase order line instance. Every po line may have location ID or holding ID or both can be 'null', if both are 'null'
 --then 'no source' is present in pol_location_source.
+--if holding was deleted after pol was created then there is 'deleted_holding' in pol_location_name 
 --Pol_location depends on how the po is created.
 
 DROP TABLE IF EXISTS po_instance;
 
 CREATE TABLE po_instance AS
-SELECT
-    pot.manual_po,
+SELECT DISTINCT 
+    pot.manual_po AS manual_po,
     poltt.rush::boolean AS rush,
     poltt.requester AS requester,
     poltt.selector AS selector,
@@ -16,43 +17,41 @@ SELECT
     pot.id AS po_number_id,
     poltt.po_line_number AS po_line_number,
     poltt.id AS po_line_id,
-    ot.code AS vendor_code, ---vendor id CONNECT TO vendor name
+    ot.code AS vendor_code, 
     ut.username AS created_by_username,
     pot.workflow_status AS po_workflow_status,
     pot.approved::boolean AS status_approved,
     jsonb_extract_path_text(po.jsonb, 'metadata', 'createdDate')::timestamptz AS created_date,  
-    json_extract_path_text(cdt.value::json, 'name') AS bill_to,
-    json_extract_path_text(cdt2.value::json, 'name') AS ship_to,
+    jsonb_extract_path_text(cdt.value::jsonb, 'name') AS bill_to,
+    jsonb_extract_path_text(cdt2.value::jsonb, 'name') AS ship_to,
     poltt.instance_id AS pol_instance_id,
     it.hrid AS pol_instance_hrid,
-    jsonb_extract_path_text(pol.jsonb, 'holdingId')::uuid AS pol_holding_id,
-    CASE WHEN jsonb_extract_path_text(pol.jsonb, 'locations', 'locationId') IS NOT NULL
-         THEN jsonb_extract_path_text(pol.jsonb, 'locations', 'locationId')::uuid 
-         ELSE ih.permanentlocationid END AS pol_location_id,
-    CASE WHEN (lot.name) IS NOT NULL
-         THEN lot.name
-         ELSE lot2.name END AS pol_location_name,
-    CASE WHEN lot.name IS NOT NULL
-         THEN 'pol_location'
-         WHEN lot2.name IS NOT NULL
-         THEN 'pol_holding'
-         ELSE 'no_source' END AS pol_location_source,
+    jsonb_extract_path_text(locations.jsonb, 'holdingId')::uuid AS pol_holding_id,
+    jsonb_extract_path_text(locations.jsonb,'locationId')::uuid AS pol_location_id,     
+    COALESCE (lot.name, lot2.name,'deleted_holding') AS pol_location_name,
+    CASE 
+        WHEN lot.name IS NULL AND lot2.name IS NULL 
+        THEN 'no sourse'
+        WHEN lot.name IS NULL AND lot2.name IS NOT NULL 
+        THEN 'pol_holding'
+        WHEN lot.name IS NOT NULL AND lot2.name IS NULL 
+        THEN 'pol_location'
+        ELSE 'x' END AS pol_location_source,    
     it.title AS title,
     poltt.publication_date AS publication_date,
     poltt.publisher AS publisher
-    FROM
-    folio_orders.purchase_order__t AS pot
-    LEFT JOIN folio_orders.po_line__t AS poltt ON pot.id = poltt.purchase_order_id
-    LEFT JOIN folio_orders.po_line AS pol ON pot.id=pol.purchaseorderid 
-    LEFT JOIN folio_inventory.location AS il ON jsonb_extract_path_text(pol.jsonb, 'locations', 'locationId')::uuid = il.id::uuid
-    LEFT JOIN folio_inventory.location__t AS lot ON il.id = lot.id
-    LEFT JOIN folio_inventory.holdings_record AS ih ON jsonb_extract_path_text(pol.jsonb, 'locations', 'holdingId')::uuid = ih.id
-    LEFT JOIN folio_inventory.location__t AS lot2 ON ih.permanentlocationid = lot2.id 
+    FROM folio_orders.po_line as pol
+    CROSS JOIN LATERAL jsonb_array_elements((pol.jsonb #> '{locations}')::jsonb) AS locations (data)
+    LEFT JOIN folio_orders.po_line__t AS poltt ON pol.id = poltt.id
     LEFT JOIN folio_inventory.instance__t AS it ON poltt.instance_id = it.id
+    LEFT JOIN folio_inventory.location__t AS lot ON (locations.jsonb #>> '{locationId}')::uuid = lot.id
+    LEFT JOIN folio_orders.purchase_order__t pot ON pol.purchaseorderid = pot.id 
+    LEFT JOIN folio_inventory.holdings_record__t AS ih ON jsonb_extract_path_text(locations.jsonb, 'holdingId')::uuid = ih.id
+    LEFT JOIN folio_inventory.location__t AS lot2 ON ih.permanent_location_id = lot2.id 
     LEFT JOIN folio_organizations.organizations__t AS ot ON pot.vendor = ot.id
     LEFT JOIN folio_orders.purchase_order AS po ON pot.id = po.id
-    LEFT JOIN folio_configuration.config_data__t cdt ON jsonb_extract_path_text(po.jsonb, 'billTo')::uuid = cdt.id
-    LEFT JOIN folio_configuration.config_data__t cdt2 ON jsonb_extract_path_text(po.jsonb, 'shipTo')::uuid = cdt2.id
+    LEFT JOIN folio_configuration.config_data__t as cdt ON jsonb_extract_path_text(po.jsonb, 'billTo')::uuid = cdt.id
+    LEFT JOIN folio_configuration.config_data__t AS cdt2 ON jsonb_extract_path_text(po.jsonb, 'shipTo')::uuid = cdt2.id
     LEFT JOIN folio_users.users__t AS ut ON jsonb_extract_path_text(po.jsonb, 'metadata', 'createdByUserId')::uuid = ut.id;
 
 COMMENT ON COLUMN po_instance.manual_po IS 'If true, order cannot be sent automatically, e.g. via EDI';
